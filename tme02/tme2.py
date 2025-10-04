@@ -1,4 +1,5 @@
 # Yuxiang ZHANG 21202829
+# Kenan Alsafadi 21502362
 
 import numpy as np
 import random
@@ -372,158 +373,135 @@ def testXindepYZ(P_XYZT: np.ndarray, epsilon: float = 1e-10) -> bool:
                 
     return True
 
-def conditional_indep(join_potential: gum.Potential, 
-                     var_X: str, 
-                     var_Y: str, 
-                     conditioning_vars: list, 
+def conditional_indep(join_potential: gum.Potential,
+                     var_X: str,
+                     var_Y: str,
+                     conditioning_vars: list,
                      epsilon: float = 1e-10) -> bool:
     """
     Teste si X est indépendant de Y conditionnellement à Z dans la distribution jointe.
-    
+
     Args:
         join_potential: Potential représentant la distribution jointe P(X,Y,Z)
         var_X: nom de la variable X
-        var_Y: nom de la variable Y  
+        var_Y: nom de la variable Y
         conditioning_vars: liste des noms des variables de conditionnement Z
         epsilon: tolérance numérique pour la comparaison
-    
+
     Returns:
         True si X ⊥ Y | Z, False sinon
     """
-    # Vérification que les variables existent dans le Potential
-    all_vars = [var_X, var_Y] + conditioning_vars
-    for var in all_vars:
-        if var not in join_potential.variableSequence():
-            raise ValueError(f"La variable '{var}' n'existe pas dans le Potential")
-    
-    # 1. Calcul de P(Z) - la distribution marginale sur les variables de conditionnement
-    if conditioning_vars:
-        P_Z = join_potential.margSumIn(conditioning_vars)
+    if len(conditioning_vars) == 0:
+        # Cas sans conditionnement: P(X,Y) == P(X)P(Y)
+        pXY = join_potential.sumIn([var_X, var_Y])
+        pX = pXY.sumOut([var_Y])
+        pY = pXY.sumOut([var_X])
+        return (pXY - (pX * pY)).abs().max() < epsilon
     else:
-        # Si pas de variables de conditionnement, P(Z) = 1 (distribution triviale)
-        P_Z = gum.Potential()
-        P_Z[{}] = 1.0
+        # Cas avec conditionnement: P(X,Y|Z) == P(X|Z)P(Y|Z)
+        vars_to_keep = [var_X, var_Y] + conditioning_vars
+        pXYZ = join_potential.sumIn(vars_to_keep)
+        pZ = pXYZ.sumOut([var_X, var_Y])
+        pXY_Z = pXYZ / pZ
+        pX_Z = pXY_Z.sumOut([var_Y])
+        pY_Z = pXY_Z.sumOut([var_X])
+        return (pXY_Z - (pX_Z * pY_Z)).abs().max() < epsilon
     
-    # 2. Calcul de P(X,Y,Z) - la distribution jointe complète
-    P_XYZ = join_potential
-    
-    # 3. Calcul de P(X,Z) - marginalisation sur Y
-    vars_XZ = [var_X] + conditioning_vars
-    P_XZ = join_potential.margSumOut([var_Y])
-    
-    # 4. Calcul de P(Y,Z) - marginalisation sur X  
-    vars_YZ = [var_Y] + conditioning_vars
-    P_YZ = join_potential.margSumOut([var_X])
-    
-    # 5. Calcul de P(X,Y|Z) = P(X,Y,Z) / P(Z)
-    # On doit étendre P_Z pour qu'il ait les mêmes dimensions que P_XYZ
-    P_XY_given_Z = P_XYZ / P_Z
-    
-    # 6. Calcul de P(X|Z) = P(X,Z) / P(Z)
-    P_X_given_Z = P_XZ / P_Z
-    
-    # 7. Calcul de P(Y|Z) = P(Y,Z) / P(Z)  
-    P_Y_given_Z = P_YZ / P_Z
-    
-    # 8. Calcul du produit P(X|Z) × P(Y|Z)
-    # On doit étendre les dimensions pour que le produit soit correct
-    product_P = P_X_given_Z * P_Y_given_Z
-    
-    # 9. Comparaison: P(X,Y|Z) == P(X|Z) × P(Y|Z) ?
-    difference = (P_XY_given_Z - product_P).abs()
-    max_diff = difference.max()
-    
-    # Affichage des informations de débogage
-    print(f"Test d'indépendance conditionnelle: {var_X} ⊥ {var_Y} | {conditioning_vars}")
-    print(f"Différence maximale: {max_diff:.2e}")
-    print(f"Résultat: {max_diff < epsilon}")
-    print()
-    
-    return max_diff < epsilon
-
-import pyAgrum as gum
-
-def conditional_indep(join_potential: gum.Potential, 
-                     var_X: str, 
-                     var_Y: str, 
-                     conditioning_vars: list, 
-                     epsilon: float = 1e-10) -> bool:
+def compact_conditional_proba(joint_proba: gum.Potential, Xin: str, epsilon: float = 1e-10) -> gum.Potential:
     """
-    Teste si X est indépendant de Y conditionnellement à Z dans la distribution jointe.
+    Retourne P(Xin | K_compact) où K_compact ⊆ toutes les autres variables
+    et toutes les variables conditionnellement indépendantes de Xin sont retirées.
     """
-    print(f"=== Test: {var_X} ⊥ {var_Y} | {conditioning_vars} ===")
+    # 1) Liste initiale K = toutes les variables sauf Xin
+    all_vars = list(joint_proba.var_names)
+    if Xin not in all_vars:
+        raise ValueError(f"{Xin} n'est pas dans joint_proba.var_names")
+    K = [v for v in all_vars if v != Xin]
+
+    # 2) Supprimer les variables X de K qui sont indépendantes de Xin conditionnellement à K\{X}
+    changed = True
+    while changed:
+        changed = False
+        for X in list(K):  # on travaille sur une copie
+            given = [v for v in K if v != X]  # K \ {X}
+            if conditional_indep(joint_proba, X, Xin, given, epsilon):
+                K.remove(X)
+                changed = True  # on continue jusqu'à stabilisation
+
+    # 3) Construire P(Xin | K)
+    vars_to_keep = [Xin] + K  # Xin en premier
+    numerator = joint_proba.sumIn(vars_to_keep)  # P(Xin, K)
+    denominator = numerator.sumOut([Xin])       # P(K)
+    conditional = numerator / denominator       # P(Xin | K)
+
+    # 4) Remettre Xin en première position (déjà fait ci-dessus)
+    conditional = conditional.putFirst(Xin)
+
+    return conditional
+
+def create_bayesian_network(joint_proba: gum.Potential, epsilon: float = 1e-10) -> list:
+    """
+    Transforme une distribution de probabilité jointe en un réseau bayésien compact
+    en utilisant l'ordre inverse des variables.
     
-    # Méthode robuste pour obtenir les noms des variables
+    Args:
+        joint_proba: Potential représentant la distribution jointe P(X0,...,Xn)
+        epsilon: tolérance numérique pour les tests d'indépendance conditionnelle
+    
+    Returns:
+        Liste des Potentials [P(Xn|Kn), ..., P(X0|K0)] représentant le réseau bayésien
+        dans l'ordre inverse de traitement des variables
+    """
+    # Création d'une copie de la distribution jointe pour ne pas modifier l'originale
     try:
-        # Essayer différentes méthodes pour obtenir les variables
-        if hasattr(join_potential, 'names'):
-            var_names = join_potential.names()
-        elif hasattr(join_potential, 'variableNames'):
-            var_names = list(join_potential.variableNames())
-        else:
-            # Méthode manuelle : essayer d'accéder aux variables par index
-            var_names = []
-            try:
-                for i in range(join_potential.nbrDim()):
-                    var = join_potential.variable(i)
-                    var_names.append(var.name())
-            except:
-                # Si tout échoue, afficher les informations disponibles
-                print("Impossible d'obtenir les noms des variables automatiquement.")
-                print("Attributs disponibles:", dir(join_potential))
-                return False
-    except Exception as e:
-        print(f"Erreur lors de la récupération des noms de variables: {e}")
-        return False
+        P = joint_proba.clone()
+    except AttributeError:
+        P = gum.Potential(joint_proba)
+
+    # Liste qui contiendra les distributions conditionnelles du réseau bayésien
+    bn_list = []
     
-    print(f"Variables disponibles: {var_names}")
+    # Obtention de la liste des variables et inversion de l'ordre
+    var_names = list(P.var_names)
+    reverse_order = list(reversed(var_names))
+
+    # Parcours des variables dans l'ordre inverse (de Xn à X0)
+    for Xi in reverse_order:
+        # Calcul de la distribution conditionnelle compacte P(Xi|Ki)
+        # où Ki est le sous-ensemble minimal de variables nécessaires
+        Q = compact_conditional_proba(P, Xi, epsilon)
+        
+        # Ajout de la distribution conditionnelle à la liste du réseau bayésien
+        bn_list.append(Q)
+        
+        # Marginalisation : suppression de Xi de la distribution jointe
+        # pour la prochaine itération (principe de décomposition)
+        P = P.sumOut([Xi])
     
-    # Vérifier que toutes les variables existent
-    all_vars = [var_X, var_Y] + conditioning_vars
-    for var in all_vars:
-        if var not in var_names:
-            print(f"ERREUR: Variable '{var}' non trouvée. Variables disponibles: {var_names}")
-            return False
+    # Retourne la liste des distributions conditionnelles dans l'ordre inverse
+    # (dernière variable traitée en premier)
+    return bn_list
+
+def calcNbParams(joint_proba: gum.Potential, epsilon: float = 1e-10) -> tuple[int, int]:
+    """
+    Calcule le nombre de paramètres de la loi jointe et du réseau bayésien compact.
     
-    try:
-        # Calcul des distributions marginales
-        print("Calcul de P(Z)...")
-        if conditioning_vars:
-            P_Z = join_potential.margSum(conditioning_vars)
-        else:
-            P_Z = gum.Potential()
-            P_Z[{}] = 1.0
-        
-        print("Calcul de P(X,Z)...")
-        P_XZ = join_potential.margSumOut([var_Y])
-        
-        print("Calcul de P(Y,Z)...")
-        P_YZ = join_potential.margSumOut([var_X])
-        
-        # Calcul des distributions conditionnelles
-        print("Calcul des probabilités conditionnelles...")
-        P_XY_given_Z = join_potential / P_Z
-        P_X_given_Z = P_XZ / P_Z
-        P_Y_given_Z = P_YZ / P_Z
-        
-        # Produit et comparaison
-        print("Calcul du produit...")
-        product_P = P_X_given_Z * P_Y_given_Z
-        
-        print("Calcul de la différence...")
-        max_diff = (P_XY_given_Z - product_P).abs().max()
-        
-        print(f"Différence maximale: {max_diff:.2e}")
-        
-        if max_diff < epsilon:
-            print(f"✓ {var_X} et {var_Y} sont indépendants conditionnellement à {conditioning_vars}")
-        else:
-            print(f"✗ {var_X} et {var_Y} ne sont PAS indépendants conditionnellement à {conditioning_vars}")
-        
-        return max_diff < epsilon
-        
-    except Exception as e:
-        print(f"Erreur lors du calcul: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+    Args:
+        joint_proba: Potential représentant la distribution jointe P(X0,...,Xn)
+        epsilon: tolérance numérique pour l'indépendance conditionnelle
+    
+    Returns:
+        tuple (taille_jointe, taille_rb) :
+        - taille_jointe : nombre de paramètres de la loi jointe
+        - taille_rb : somme des paramètres des conditionnelles du réseau bayésien
+    """
+    # 1) Taille de la loi jointe
+    taille_jointe = joint_proba.domainSize()
+    
+    # 2) Création du réseau bayésien en utilisant le même epsilon
+    bn_list = create_bayesian_network(joint_proba, epsilon)
+    
+    # 3) Taille du réseau bayésien = somme des tailles de chaque Potential
+    taille_rb = sum(Q.domainSize() for Q in bn_list)
+    
+    return taille_jointe, taille_rb
